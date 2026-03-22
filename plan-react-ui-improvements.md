@@ -231,6 +231,39 @@ to shrink.
 
 ---
 
+## 3. Replace Llama Icon with Delphi-Helmet Llama
+
+### Asset
+
+`delphi-ollama.png` — black-and-white llama wearing a Roman/Delphi
+centurion helmet, circular framing on black background. Located at
+project root: `C:\vsdev\ollama\delphi-ollama.png`.
+
+### Current State
+
+- `app/ui/app/public/hello.png` — waving llama mascot (NOT referenced
+  in any source code, but Vite copies it to `dist/`)
+- `app/ui/app/index.html` line 5 — favicon is `vite.svg` (Vite default)
+- No other mascot/logo references in React source
+
+### Changes
+
+| What | File | Action |
+|------|------|--------|
+| **Favicon** | `app/ui/app/index.html` | Change `vite.svg` to `delphi-ollama.png` |
+| **Public asset** | `app/ui/app/public/delphi-ollama.png` | Copy from project root |
+| **Old mascot** | `app/ui/app/public/hello.png` | Keep (not referenced, harmless) |
+| **Empty chat** | `src/components/Chat.tsx` or `ChatForm.tsx` | Show mascot on landing page |
+| **App title** | `app/ui/app/index.html` | Change `<title>Ollama</title>` to custom |
+
+### Future: App Icon (Delphi + Go)
+
+The `.ico` file for Windows tray/titlebar lives in `app/assets/`.
+To use delphi-ollama there too, convert the PNG to `.ico` format
+(256x256, 48x48, 32x32, 16x16 sizes) and replace the existing icon.
+
+---
+
 ## Implementation Order
 
 1. **`ModelBadge` component** — new file, no risk to existing code
