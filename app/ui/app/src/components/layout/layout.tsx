@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Link } from "@tanstack/react-router";
 import { useSettings } from "@/hooks/useSettings";
 
@@ -11,6 +12,13 @@ export function SidebarLayout({
 }>) {
   const { settings, setSettings } = useSettings();
   const isWindows = navigator.platform.toLowerCase().includes("win");
+
+  // Auto-hide sidebar on narrow windows (< 800px)
+  useEffect(() => {
+    if (window.innerWidth < 800 && settings.sidebarOpen) {
+      setSettings({ SidebarOpen: false });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className={`flex transition-[width] duration-300 dark:bg-neutral-900`}>

@@ -12,6 +12,7 @@ import { useCloudStatus } from "@/hooks/useCloudStatus";
 import { useQueryClient } from "@tanstack/react-query";
 import { getModelUpstreamInfo } from "@/api";
 import { ArrowDownTrayIcon } from "@heroicons/react/24/outline";
+import { ModelBadge } from "./ModelBadge";
 
 const stalenessCheckCache = new Map<string, number>();
 
@@ -180,11 +181,13 @@ export const ModelPicker = forwardRef<
         className="flex items-center select-none gap-1.5 rounded-full px-3.5 py-1.5 bg-white dark:bg-neutral-700 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-neutral-100 cursor-pointer"
       >
         <div className="flex items-center gap-2">
-          <span>
-            {isDisabled
-              ? "Loading..."
-              : selectedModel?.model || "Select a model"}
-          </span>
+          {isDisabled ? (
+            <span>Loading...</span>
+          ) : selectedModel?.model ? (
+            <ModelBadge modelName={selectedModel.model} />
+          ) : (
+            <span>Select a model</span>
+          )}
         </div>
         <svg
           className="h-3 w-3 opacity-70"
@@ -201,7 +204,7 @@ export const ModelPicker = forwardRef<
         </svg>
       </button>
       {isOpen && (
-        <div className="absolute right-0 text-[15px] bottom-full mb-2 z-50 w-64 rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20">
+        <div className="absolute right-0 text-[15px] bottom-full mb-2 z-50 w-64 max-w-[calc(100vw-2rem)] rounded-2xl overflow-hidden bg-white border border-neutral-100 text-neutral-800 shadow-xl shadow-black/5 backdrop-blur-lg dark:border-neutral-600/40 dark:bg-neutral-800 dark:text-white dark:ring-black/20">
           <div className="px-1 py-2 border-b border-neutral-100 dark:border-neutral-700">
             <input
               ref={searchInputRef}
@@ -334,6 +337,7 @@ export const ModelList = forwardRef(function ModelList(
                     : ""
                 }`}
               >
+                <ModelBadge modelName={model.model} size="sm" />
                 <span className="flex-1 text-left truncate min-w-0">
                   {model.model}
                 </span>

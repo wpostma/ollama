@@ -17,6 +17,19 @@
   }
 }
 
+/* Narrow viewport scaling for Delphi panel embedding (300-480px wide) */
+@media (max-width: 480px) {
+  html {
+    font-size: 14px;
+  }
+}
+
+@media (max-width: 360px) {
+  html {
+    font-size: 13px;
+  }
+}
+
 /* messaging-style typing indicator animation */
 @keyframes typing {
   0%,
