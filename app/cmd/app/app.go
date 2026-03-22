@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -43,6 +44,8 @@ var debug = strings.EqualFold(os.Getenv("OLLAMA_DEBUG"), "true") || os.Getenv("O
 var (
 	fastStartup = false
 	devMode     = false
+	headless    = false
+	fixedPort   = 0
 )
 
 type appMove int
@@ -97,6 +100,15 @@ func main() {
 			case "-dev", "--dev":
 				// Development mode: use local dev server and enable CORS
 				devMode = true
+			case "--headless":
+				// Headless mode: run UI server only, no WebView2 window
+				headless = true
+			default:
+				if strings.HasPrefix(arg, "--port=") {
+					if p, err := strconv.Atoi(strings.TrimPrefix(arg, "--port=")); err == nil {
+						fixedPort = p
+					}
+				}
 			}
 		}
 	}
@@ -191,7 +203,9 @@ func main() {
 	installSymlink()
 
 	var ln net.Listener
-	if devMode {
+	if fixedPort > 0 {
+		ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", fixedPort))
+	} else if devMode {
 		// Use a fixed port in dev mode for predictable API access
 		ln, err = net.Listen("tcp", "127.0.0.1:3001")
 	} else {
@@ -269,7 +283,7 @@ func main() {
 		},
 		Store:        st,
 		ToolRegistry: toolRegistry,
-		Dev:          devMode,
+		Dev:          devMode || headless,
 		Logger:       slog.Default(),
 		Updater:      upd,
 		UpdateAvailableFunc: func() {

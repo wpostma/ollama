@@ -162,6 +162,18 @@ func UpdateAvailable(ver string) error {
 }
 
 func osRun(shutdown func(), hasCompletedFirstRun, startHidden bool) {
+	if headless {
+		// Headless mode: no tray, no WebView2 window.
+		// Just block until SIGINT/SIGTERM, letting the HTTP server run.
+		slog.Info("running in headless mode", "port", uiServerPort)
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+		<-signals
+		slog.Info("headless mode shutting down")
+		shutdown()
+		return
+	}
+
 	var err error
 	app.shutdown = shutdown
 	app.t, err = wintray.NewTray(app)
