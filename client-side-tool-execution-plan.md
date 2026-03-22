@@ -13,12 +13,34 @@ This means the only tools available are ones compiled into the Go binary
 tools — database queries, file system access, OnePOS integration, etc. —
 because the server has no way to delegate tool execution back to the client.
 
-## Goal
+## Key Finding (2026-03-22): No Go Changes Needed
 
-Enable a **client-side tool execution mode** where the headless Go server
-pauses its tool loop, sends tool_call events to the client, waits for the
-client to execute the tools and POST results back, then resumes the model
-conversation.
+**The `/v1/chat/completions` endpoint already supports client-driven tool
+loops.** Tested and proven working:
+
+1. Client sends `tools` array in request → model returns `finish_reason: "tool_calls"`
+2. Client executes tools locally
+3. Client sends results back as `role: "tool"` messages → model responds
+4. Parallel tool calls work (multiple tool_calls in one response)
+5. Streaming works (SSE with `data:` prefix)
+6. No auth token needed on port 11434
+
+This is the standard OpenAI protocol. The Delphi client talks directly to
+`http://127.0.0.1:11434/v1/chat/completions` and drives its own tool loop.
+The UI server on port 3001 is only needed for the React SPA and chat
+persistence.
+
+See `openai-endpoint-reference.md` for full protocol details and examples.
+
+## Original Goal (Revised)
+
+~~Enable a client-side tool execution mode where the headless Go server
+pauses its tool loop.~~ **Not needed.** The existing OpenAI-compatible
+endpoint already provides this. The remaining work is:
+
+1. Build the Delphi tool registry and loop (client-side only)
+2. Optionally extend the UI server's `/api/v1/chat/{id}` to also support
+   client-provided tools (for React UI integration — lower priority)
 
 ## What Exists Today
 
@@ -294,88 +316,97 @@ Delphi                   Go UI Server              Ollama Engine
 
 ### 1. How does the OpenAI-compatible endpoint handle tool calls today?
 
-The `/v1/chat/completions` endpoint already supports the standard OpenAI
-tool-calling protocol where the client drives the loop. We need to
-understand:
+**ANSWERED — it works fully.** Tested 2026-03-22 with qwen3:8b.
 
-- Does the OpenAI middleware (`middleware/openai.go`) already pass tool
-  definitions through to the model?
-- Does it already return `finish_reason: "tool_calls"` when the model
-  wants to call tools?
-- Can a client already POST back `role: "tool"` messages with results?
-- If so, the **entire client-driven loop may already work** via
-  `/v1/chat/completions` without any changes to the UI server. The UI
-  server's `/api/v1/chat/{id}` would just need to be taught the same
-  pattern.
+- Tools pass through to the model: YES
+- Returns `finish_reason: "tool_calls"`: YES
+- Accepts `role: "tool"` messages with results: YES
+- Parallel tool calls: YES (multiple tool_calls in one response)
+- Streaming tool calls via SSE: YES
+- System messages: YES
 
-**Action:** Test with curl — send a ChatRequest with tools to
-`/v1/chat/completions`, see if the model returns tool_calls, then send
-a follow-up with tool results. If this works, the Delphi client can
-just use the OpenAI-compatible endpoint directly and skip the UI
-server's chat handler entirely.
+**The Delphi client uses `/v1/chat/completions` directly. No Go changes
+needed for client-side tool execution.**
+
+Key protocol details:
+- Tool arguments are **JSON strings** (not parsed objects) in OpenAI format
+- Tool call IDs must be echoed back in `tool_call_id`
+- Models need `"tools"` in capabilities (check via `/api/show`)
+- Thinking models emit `reasoning` field before tool calls
 
 ### 2. Can server-side and client-side tools coexist?
 
-The current design registers tools per-request based on flags. We need
-to figure out:
+**PARTIALLY ANSWERED.** Two separate paths exist:
 
-- Should client-provided tool definitions **replace** server-side tools,
-  or **merge** with them? (e.g., client provides `query_pos` alongside
-  server's `web_search`)
-- If they merge, what happens when the model calls a server-side tool
-  (execute immediately) vs. a client-side tool (pause and delegate)?
-  The tool loop needs to handle a mix.
-- Should the server pre-filter which tools to offer the model based on
-  capabilities, or should the client be fully responsible for curating
-  the tool list?
+- **`/v1/chat/completions` (port 11434)** — pure pass-through. The core
+  server sends tools to the model and returns tool_calls to the client.
+  No server-side execution. The client provides ALL tools and handles
+  ALL execution. This is the Delphi path.
 
-**Action:** Read `buildChatRequest()` in `ui.go` to see how
-`availableTools` gets assembled and passed to the ollama engine. Check
-whether the engine's chat handler strips/validates tools or passes them
-through verbatim. Determine whether mixing server + client tools in one
-request is architecturally clean or creates ordering problems in the
-tool execution loop.
+- **`/api/v1/chat/{id}` (port 3001, UI server)** — server-side loop.
+  The UI server registers its own tools (web_search, browser.*) and
+  executes them. Client-provided tools are NOT supported here.
+
+**For now, these are separate paths — no mixing needed.** The Delphi
+client uses the OpenAI endpoint for tool conversations. The React UI
+uses the UI server. They don't interfere.
+
+**Future consideration:** If we want the React UI (in TEdgeBrowser) to
+also support Delphi-provided tools, we'd need to either:
+- Extend the UI server to accept client tool definitions, or
+- Have Delphi intercept the React UI's chat requests and redirect
+  tool-enabled ones to the OpenAI endpoint
+
+This is a Phase 2 concern. Not blocking.
 
 ### 3. What is the Delphi-side tool execution model?
 
-Before coding the protocol, we need to design how the Delphi client
-will actually execute tools:
+**OPEN — needs design work before coding.**
 
-- **Tool registry in Delphi** — a `TToolRegistry` with registered
-  `ITool` implementations. Each tool has a name, schema, and Execute
-  method. Mirrors the Go interface.
-- **Threading** — tool execution may be slow (database queries, API
-  calls). Does it run on the main thread (blocking UI) or a worker
-  thread? The HTTP stream is already being consumed on a background
-  thread, so tool execution should happen there too.
-- **Tool approval UI** — for dangerous tools (file writes, shell
-  commands), should Delphi show a confirmation dialog before executing?
-  This requires marshalling back to the main thread.
-- **Tool result serialization** — Delphi objects need to serialize to
-  JSON that the Go server can parse. Standard `TJSONObject` should
-  suffice.
+Now that we know the wire protocol (OpenAI `/v1/chat/completions`),
+the Delphi design questions are:
 
-**Action:** Sketch the Delphi `ITool` interface and a sample tool
-(e.g., `TFileReadTool` or `TPOSQueryTool`) to validate the design
-before committing to the wire protocol.
+- **Tool registry** — `IOllamaTool` interface with `Name`, `Description`,
+  `Schema`, `Execute` methods. `TOllamaToolRegistry` holds registered tools.
+  Mirrors Go's `tools.Tool` interface.
+- **Threading** — the chat loop (HTTP POST → parse SSE → execute tool →
+  POST again) should run on a worker thread. Tool execution happens on
+  that same worker thread. UI updates via `TThread.Synchronize`.
+- **Tool approval** — for dangerous tools, `Synchronize` to main thread
+  to show a confirmation dialog. Worker thread blocks until approved.
+  Use Ollama's `x/agent/approval.go` patterns as reference for
+  allowlist/denylist.
+- **JSON serialization** — `TJSONObject` for tool results. Tool arguments
+  arrive as JSON strings from the OpenAI format — parse with
+  `TJSONObject.ParseJSONValue`.
+- **SSE parsing** — read lines from `TNetHTTPClient` response stream.
+  Lines start with `data: `. Skip blanks. Stop on `data: [DONE]`.
+  Parse each `data:` payload as JSON. Accumulate `delta.tool_calls`.
+
+**Action:** Sketch `IOllamaTool` interface and a sample
+`TFileReadTool` in the WarpExpert project. Validate the threading
+model with a simple non-tool chat first, then add tool support.
 
 ### 4. Does the React frontend need changes?
 
-The current React UI has no concept of client-side tools — it only
-displays server-executed tool results. If we want the Ollama web UI
-(running in TEdgeBrowser) to also support client-side tools:
+**OPEN — but not blocking Phase 1.**
 
-- The React event handler would need to recognize `tool_calls_pending`
-  events
-- It would need to call back to Delphi via `window.chrome.webview.postMessage()`
-  (WebView2's JS→native bridge)
-- Delphi handles `OnWebMessageReceived`, executes the tool, and POSTs
-  results back to the server
+Two UI paths for tool-enabled chats:
 
-This is a more complex integration path. The simpler alternative is to
-bypass the React UI for tool-enabled chats and build a native Delphi
-chat panel that talks directly to the API.
+**Path A: Native Delphi chat panel (recommended for Phase 1)**
+- Delphi builds its own chat UI (TMemo/TRichEdit + tool status panel)
+- Talks directly to `/v1/chat/completions` on port 11434
+- Full control over tool execution, approval dialogs, result display
+- No React/JS changes needed
+- The React UI in TEdgeBrowser is still available for non-tool chats
 
-**Action:** Decide whether tool-enabled conversations should use the
-React UI (with JS↔Delphi bridging) or a native Delphi UI. This
-affects the entire architecture.
+**Path B: React UI + JS↔Delphi bridge (Phase 2)**
+- React UI runs in TEdgeBrowser as today
+- Tool calls bridge to Delphi via `window.chrome.webview.postMessage()`
+- Delphi handles `OnWebMessageReceived`, executes tool, POSTs result
+- Requires React changes to emit `postMessage` on `tool_calls_pending`
+- More complex but keeps a single unified UI
+
+**Decision:** Start with Path A. It's simpler, proves the tool
+infrastructure, and doesn't require React changes. Path B can come
+later once the Delphi tool registry is battle-tested.
