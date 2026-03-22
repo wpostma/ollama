@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -108,7 +109,9 @@ func performWebFetch(ctx context.Context, targetURL string) (*FetchResponse, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if signature != "" {
+	if apiKey := os.Getenv("OLLAMA_API_KEY"); apiKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	} else if signature != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", signature))
 	}
 
