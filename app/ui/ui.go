@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 // package ui implements a chat interface for Ollama
 package ui
@@ -155,7 +155,7 @@ func (s *Server) ollamaProxy() http.Handler {
 					return
 				}
 
-				target := envconfig.Host()
+				target := envconfig.ConnectableHost()
 				s.log().Info("configuring ollama proxy", "target", target.String())
 
 				newProxy := httputil.NewSingleHostReverseProxy(target)

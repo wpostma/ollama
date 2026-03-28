@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 // Package dialog provides a simple cross-platform common dialog API.
 // Eg. to prompt the user with a yes/no dialog:

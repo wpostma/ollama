@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 /*
  * MIT License
@@ -35,6 +35,10 @@ package webview
 
 #cgo windows CXXFLAGS: -DWEBVIEW_EDGE -std=c++14 -I${SRCDIR}/libs/mswebview2/include
 #cgo windows LDFLAGS: -static -ladvapi32 -lole32 -lshell32 -lshlwapi -luser32 -lversion
+
+#cgo linux CXXFLAGS: -DWEBVIEW_GTK -std=c++11
+#cgo linux,!gtk4 pkg-config: gtk+-3.0 webkit2gtk-4.1
+#cgo linux LDFLAGS: -ldl
 
 #include "webview.h"
 

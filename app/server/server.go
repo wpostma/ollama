@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 package server
 
@@ -159,6 +159,12 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.log = l
 	defer s.log.Close()
+
+	// On Linux, if a system service is already running, use it instead
+	// of starting a new child process.
+	if useExistingServer(ctx) {
+		return ctx.Err()
+	}
 
 	if err := cleanup(); err != nil {
 		slog.Warn("failed to cleanup previous ollama process", "err", err)
@@ -338,14 +344,14 @@ func GetInferenceInfo(ctx context.Context) (*InferenceInfo, error) {
 			return nil, fmt.Errorf("timeout scanning server log for inference compute details")
 		default:
 		}
-		file, err := os.Open(serverLogPath)
+		reader, err := openServerLog()
 		if err != nil {
-			slog.Debug("failed to open server log", "log", serverLogPath, "error", err)
+			slog.Debug("failed to open server log", "error", err)
 			time.Sleep(time.Second)
 			continue
 		}
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
+		defer reader.Close()
+		scanner := bufio.NewScanner(reader)
 		for scanner.Scan() {
 			line := scanner.Text()
 			// Check for inference compute lines
