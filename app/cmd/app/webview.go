@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 package main
 
@@ -169,11 +169,29 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 				window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateScrollbarStyles);
 			`
 		}
+		// Linux-specific layout fixes for WebKit2GTK:
+		// 1. Explicit height on html/body for h-screen (100vh) to work.
+		// 2. Remove title bar spacers — GTK provides its own title bar.
+		// 3. Move sidebar/new-chat buttons up to remove dead space.
+		if runtime.GOOS == "linux" {
+			init += `
+				(function() {
+					var style = document.createElement('style');
+					style.textContent = ` + "`" + `
+						html, body { height: 100% !important; margin: 0 !important; padding: 0 !important; overflow: hidden !important; }
+						#root { height: 100% !important; }
+					` + "`" + `;
+					document.head.appendChild(style);
+					window.__IS_LINUX = true;
+				})();
+			`
+		}
+
 		// on windows make ctrl+n open new chat
 		// TODO (jmorganca): later we should use proper accelerators
 		// once we introduce a native menu for the window
 		// this is only used on windows since macOS uses the proper accelerators
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
 			init += `
 				document.addEventListener('keydown', function(e) {
 					if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
@@ -441,8 +459,12 @@ func (w *Webview) Run(path string) unsafe.Pointer {
 
 		// On Darwin, we can't have 2 threads both running global event loops
 		// but on Windows, the event loops are tied to the window, so we're
-		// able to run in both the tray and webview
-		if runtime.GOOS != "darwin" {
+		// able to run in both the tray and webview.
+		// On Linux, GTK's main loop must run on the main thread (the one
+		// that called gtk_init via webview_create). The main goroutine is
+		// locked to the OS thread by webview.init(). We run gtk_main from
+		// osRun on that thread instead.
+		if runtime.GOOS == "windows" {
 			slog.Debug("starting webview event loop")
 			go func() {
 				wv.Run()

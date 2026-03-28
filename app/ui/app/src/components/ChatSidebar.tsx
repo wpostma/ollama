@@ -260,6 +260,7 @@ export function ChatSidebar({ currentChatId }: ChatSidebarProps) {
   }
 
   const isWindows = navigator.platform.toLowerCase().includes("win");
+  const isLinux = navigator.platform.toLowerCase().includes("linux");
 
   return (
     <nav className="flex flex-1 flex-col min-h-0 select-none">
@@ -283,7 +284,7 @@ export function ChatSidebar({ currentChatId }: ChatSidebarProps) {
           </svg>
           <span className="truncate">New Chat</span>
         </Link>
-        {isWindows && (
+        {(isWindows || isLinux) && (
           <Link
             href="/settings"
             className={`flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left text-sm text-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 dark:text-neutral-300`}
