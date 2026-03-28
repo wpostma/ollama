@@ -43,3 +43,10 @@ CGO_ENABLED=1 go build -o ollama-app.exe ./app/cmd/app
 ```
 
 See `CLAUDE.md` for detailed build notes and the full file modification index.
+
+## Note
+
+If you only want the Linux native GUI without the other customizations (model
+badges, API key workaround, headless mode, Delphi integration), use the
+`linux_ui_feature` branch instead. It contains just the Linux GUI changes on
+top of upstream main.
