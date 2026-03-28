@@ -1,265 +1,205 @@
 # Linux Native GUI App for Ollama
 
-**Status:** Phase 1 MVP - Compiles and links successfully
+**Status:** Phase 1 Complete -- working GUI on Ubuntu 24.04 with NVIDIA RTX 3080
 **Date:** 2026-03-27
-**Goal:** Build a Linux/Ubuntu native GUI equivalent to the existing macOS and Windows desktop apps in `app/`.
+**Branch:** `linux_ui_feature`
+**Commit:** `1e1f2249` (39 files changed, 858 insertions, 44 deletions)
 
 ---
 
-## 1. Current Architecture Summary
+## Patch Notes (Phase 1)
+
+### What shipped
+
+A fully functional Linux desktop GUI for Ollama, matching the existing macOS and
+Windows apps. The app launches a GTK3 window with a WebKit2GTK webview hosting
+the same React SPA used on other platforms. It detects and connects to the
+existing ollama systemd service rather than starting its own child process.
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `app/cmd/app/app_linux.go` | Linux platform entry point: `osRun`, `showWindow`/`hideWindow` via GTK CGO, PID file management, signal handling |
+| `app/server/server_linux.go` | System service detection (`/api/version` probe), journalctl log reader for inference compute info, no-op `reapServers` |
+| `app/dialog/dlgs_linux.go` | File/directory/message dialogs via `zenity` |
+| `app/updater/updater_linux.go` | Stub updater (Linux updates via package manager) |
+| `linux-native-gui-app.md` | This document |
+
+### Modified files (35 total)
+
+- **Build constraints:** Added `|| linux` to all `//go:build windows || darwin` files across `app/` (assets, auth, cmd, dialog, format, logrotate, server, store, tools, types, ui, updater, version, webview)
+- **`app/webview/webview.go`:** Added Linux CGO flags (`-DWEBVIEW_GTK`, `pkg-config: gtk+-3.0 webkit2gtk-4.1`)
+- **`app/server/server.go`:** Added `useExistingServer()` hook and `openServerLog()` platform abstraction
+- **`app/server/server_unix.go`:** Added `useExistingServer()` (returns false) and `openServerLog()` stubs
+- **`app/server/server_windows.go`:** Same stubs for interface parity
+- **`app/cmd/app/app.go`:** Added `xdg-open` for Linux browser launching
+- **`app/cmd/app/webview.go`:** Linux CSS injection for viewport height fix, Linux layout flag (`window.__IS_LINUX`), GTK event loop handling (Linux treated like Darwin -- no goroutine), Ctrl+N shortcut for Linux
+- **`app/ui/app/src/components/layout/layout.tsx`:** Added `isLinux` detection, reduced title bar spacers (`h-13` to `h-2`), adjusted button positioning for GTK native title bar
+- **`app/ui/app/src/components/Chat.tsx`:** Added `isLinux` for padding adjustments
+- **`app/ui/app/src/components/ChatSidebar.tsx`:** Settings link visible on Linux (like Windows)
+- **`app/ui/app/src/components/Settings.tsx`:** Back arrow navigation on Linux (like Windows), reduced left padding
+
+### Build instructions
+
+```bash
+# Install dependencies (Ubuntu 22.04+)
+sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+# Build the React SPA
+cd app/ui/app && npm install && npm run build && cd ../../..
+
+# Build the app
+CGO_ENABLED=1 go build -o ollama-app ./app/cmd/app/
+
+# Run (assumes ollama system service is running)
+./ollama-app
+```
+
+### Runtime dependencies
+
+- `libgtk-3-0`, `libwebkit2gtk-4.1-0` (GTK3 + WebKit2GTK)
+- `zenity` (for native file/directory dialogs)
+- `ollama` system service running on port 11434
+
+---
+
+## Retrospective
+
+### What went well
+
+1. **The GTK backend was already there.** The vendored `webview.h` (3900+ lines)
+   already contained a complete GTK3 + WebKit2GTK implementation behind
+   `#ifdef WEBVIEW_GTK`. Ollama hadn't stripped it -- they just never added CGO
+   flags to activate it on Linux. The actual webview enablement was 3 lines of
+   CGO directives.
+
+2. **Clean platform abstraction.** The existing codebase has a well-designed
+   platform layer: `osRun()`, `showWindow()`, `hideWindow()`, `installSymlink()`,
+   etc. Each platform file implements the same interface. Adding Linux was mostly
+   filling in the blanks.
+
+3. **System service integration.** The biggest design win was recognizing that
+   Linux doesn't need the GUI to manage its own ollama server. The system service
+   is already running via systemd. The `useExistingServer()` hook lets the Linux
+   GUI connect to the existing service while macOS/Windows continue starting
+   their own child processes.
+
+4. **Shared React SPA.** ~95% of the UI is platform-agnostic. The only
+   Linux-specific changes were CSS (viewport height), layout spacing (GTK title
+   bar vs custom title bar), and button positioning. Total React changes: 4
+   files, ~15 lines.
+
+### What was tricky
+
+1. **WEBKIT_DISABLE_DMABUF_RENDERER killed the window.** Setting this env var
+   (intended as an NVIDIA workaround) actually prevented the window from
+   rendering at all. The webview.h already has its own NVIDIA dmabuf workaround
+   that detects `/sys/module/nvidia` and applies the fix automatically. Lesson:
+   don't second-guess the library's built-in workarounds.
+
+2. **GTK main loop threading.** GTK's event loop (`gtk_main()`) must run on the
+   same OS thread that called `gtk_init()`. The webview library's `init()` calls
+   `runtime.LockOSThread()` to pin goroutine 1 to the main thread. On macOS,
+   the Cocoa event loop (`C.run()`) takes over this thread. On Windows, the
+   webview event loop runs in a goroutine (Windows event loops are per-window).
+   On Linux, we needed to call `C.gtk_main()` on the main thread after webview
+   setup, matching the Darwin pattern.
+
+3. **Window visibility.** The webview code hides the window immediately after
+   creation (`hideWindow(wv.Window())`), expecting the platform to show it later.
+   On macOS, native Cocoa callbacks handle this. On Windows, `osRun` explicitly
+   shows + centers the window. On Linux, nobody was calling `showWindow`. The fix
+   was making `hideWindow` a no-op on Linux since the GTK webview constructor
+   already calls `gtk_widget_show_all`.
+
+4. **Inference compute from journalctl.** The `GetInferenceInfo()` function reads
+   `serverLogPath` to find GPU info. On Linux with the system service, the local
+   log file exists but is empty (created by `openRotatingLog()` but never written
+   to since no child server starts). The fix: `openServerLog()` platform hook
+   that checks file size and falls back to `journalctl -u ollama -o cat -b`.
+
+5. **JSC_SIGNAL_FOR_GC.** WebKit's JavaScriptCore uses SIGUSR1 for GC, which
+   conflicts with Go's signal handling. Setting `JSC_SIGNAL_FOR_GC=42` caused
+   WebKit to abort with "invalid option". Removing the env var entirely works --
+   the "Overriding existing handler for signal 10" message is a warning, not
+   fatal. Go's runtime handles the signal conflict gracefully.
+
+### Decisions made
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Tray library | Deferred to Phase 2 | Not needed for MVP; the window is the primary interface |
+| Dialog system | zenity | Simple, no CGO, available everywhere, covers all dialog types |
+| Webview approach | Activate existing GTK backend | It was already in webview.h, just needed CGO flags |
+| GTK version | GTK 3 | Matches WebKit2GTK availability; GTK 4 would require webkit2gtk-5.0 |
+| WebKit2GTK version | 4.1 | Available on Ubuntu 22.04+, better security defaults |
+| Server management | Detect system service | Linux installs ollama as a systemd service; the GUI should use it, not fight it |
+| Window management | No-hide + GTK show | Simplest approach that works; no need for idle callbacks or deferred show |
+
+### Open issues / Phase 2
+
+- **System tray:** No tray icon yet. When the window is closed, the app exits.
+  Phase 2 should add getlantern/systray with Show/Hide/Quit menu.
+- **Desktop integration:** No `.desktop` file, no icon in app launcher, no
+  `ollama://` URL scheme handler, no autostart.
+- **Packaging:** Currently just a raw binary. Need AppImage and/or .deb.
+- **Scrollbar styling:** WebKit2GTK's default scrollbars are functional but
+  don't match the custom styling on Windows. Could add Linux-specific CSS.
+- **Window size persistence:** The `resize` binding saves size to the store,
+  but the GTK window doesn't restore it on next launch.
+- **Wayland testing:** WebKit2GTK supports Wayland, but untested. GTK3
+  auto-selects the backend.
+- **Multi-distro testing:** Only tested on Ubuntu 24.04 (GNOME, X11, NVIDIA).
+  Should test KDE, Wayland, AMD GPU, Fedora, Arch.
+
+---
+
+## Original Planning Sections
+
+The sections below are the original planning document, preserved for reference.
+Items marked with checkmarks were completed in Phase 1.
+
+### Architecture Summary
 
 The Ollama desktop app lives in `app/` and consists of:
 
 | Component | Shared | macOS-specific | Windows-specific | Linux |
 |-----------|--------|----------------|-----------------|-------|
-| **Main entry** (`app/cmd/app/app.go`) | Core init, logging, server mgmt | `app_darwin.go` — Cocoa event loop, CGO | `app_windows.go` — Win32 API, syscall | **MISSING** |
-| **Webview** (`app/webview/`) | Go wrapper (`webview.go`) | WebKit framework via CGO | Edge WebView2 via CGO | **MISSING** |
-| **System tray** | — | Cocoa NSMenu (in `app_darwin.h`) | `app/wintray/` package (Win32) | **MISSING** |
-| **Dialogs** (`app/dialog/`) | Builder API (`dlgs.go`) | `cocoa/` subpackage via CGO | `dlgs_windows.go` via w32 | **MISSING** |
-| **Server mgmt** (`app/server/`) | Core logic (`server.go`) | `server_unix.go` — pkill/pgrep, XDG paths | `server_windows.go` — wmic, LOCALAPPDATA | **Reuse `server_unix.go`** |
-| **UI server** (`app/ui/`) | HTTP API + React SPA | — | — | **Reusable as-is** |
-| **Data store** (`app/store/`) | SQLite (shared) | — | — | **Reusable as-is** |
-| **Updater** (`app/updater/`) | Core update logic | DMG installer via ObjC | NSIS .exe installer | **MISSING** |
-| **Login at startup** | — | LaunchAgent plist | Startup folder shortcut | **MISSING** |
+| **Main entry** (`app/cmd/app/app.go`) | Core init, logging, server mgmt | `app_darwin.go` -- Cocoa event loop, CGO | `app_windows.go` -- Win32 API, syscall | `app_linux.go` -- GTK main loop, CGO |
+| **Webview** (`app/webview/`) | Go wrapper (`webview.go`) | WebKit framework via CGO | Edge WebView2 via CGO | GTK3 + WebKit2GTK via CGO |
+| **System tray** | -- | Cocoa NSMenu (in `app_darwin.h`) | `app/wintray/` package (Win32) | Phase 2 |
+| **Dialogs** (`app/dialog/`) | Builder API (`dlgs.go`) | `cocoa/` subpackage via CGO | `dlgs_windows.go` via w32 | `dlgs_linux.go` via zenity |
+| **Server mgmt** (`app/server/`) | Core logic (`server.go`) | `server_unix.go` -- pkill/pgrep | `server_windows.go` -- wmic | `server_linux.go` -- system service detection |
+| **UI server** (`app/ui/`) | HTTP API + React SPA | -- | -- | Reused as-is + CSS fixes |
+| **Data store** (`app/store/`) | SQLite (shared) | -- | -- | Reused as-is |
+| **Updater** (`app/updater/`) | Core update logic | DMG installer via ObjC | NSIS .exe installer | Stub (package manager) |
+| **Login at startup** | -- | LaunchAgent plist | Startup folder shortcut | Phase 2 |
 
-**Key insight:** The app uses a webview-hosted React SPA for all UI. No native widgets. The platform layer is thin: tray icon, window management, dialogs, process management.
+### Implementation Phases
 
----
+- [x] **Phase 1: Minimal Viable Linux GUI** -- Complete
+- [ ] **Phase 2: Desktop Integration** -- .desktop file, icons, autostart, URL scheme, system tray
+- [ ] **Phase 3: Packaging** -- AppImage, .deb
+- [ ] **Phase 4: Polish** -- Wayland, HiDPI, multi-distro testing
 
-## 2. What Needs to Be Built
+### Dependencies
 
-### 2.1 Webview Backend (GTK + WebKit2)
-
-The vendored webview library (`app/webview/`) is a fork of the [webview](https://github.com/nicoria/webview) project by Serge Zaitsev / Steffen André Langnes. The upstream C/C++ library supports three backends:
-
-- `WEBVIEW_COCOA` — macOS (currently used)
-- `WEBVIEW_EDGE` — Windows (currently used)
-- `WEBVIEW_GTK` — Linux via GTK3 + WebKit2GTK (**stripped from ollama's vendor**)
-
-**Approach:** Re-add the GTK backend from upstream webview. This requires:
-
-- Adding `#cgo linux` directives to `webview.go`:
-  ```
-  #cgo linux CXXFLAGS: -DWEBVIEW_GTK -std=c++11
-  #cgo linux pkg-config: gtk+-3.0 webkit2gtk-4.1
-  #cgo linux LDFLAGS: -ldl
-  ```
-- Restoring the GTK implementation in `webview.cc` / `webview.h` from the upstream project
-- **Build dependency:** `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`
-
-**Risk:** The upstream webview project has evolved. Need to check compatibility with ollama's vendored version. May need to update the vendor or cherry-pick the GTK backend.
-
-### 2.2 System Tray (`app/linuxtray/` or use getlantern/systray)
-
-**Option A: getlantern/systray** (recommended)
-- 3.7k GitHub stars, mature, cross-platform
-- Linux support via `libappindicator3` or `libayatana-appindicator3` (CGO)
-- Already has a webview example in their repo
-- Apache-2.0 license (compatible with ollama's MIT)
-- Used by 1.6k+ projects
-- **Build dependency:** `libayatana-appindicator3-dev` (Ubuntu 22.04+) or `libappindicator3-dev` (older)
-
-**Option B: Custom GTK tray via gotk3**
-- More control, tighter integration
-- Heavier dependency, more code to maintain
-- Overkill for a tray icon + menu
-
-**Option C: dbus/StatusNotifierItem protocol directly**
-- No CGO needed
-- Complex to implement correctly
-- Would handle KDE, GNOME, etc. natively
-
-**Recommendation:** Option A. getlantern/systray is battle-tested and maps cleanly to the existing `wintray` pattern. The tray needs: icon, tooltip, menu items (Show/Hide, Models, Quit, update notification).
-
-### 2.3 Platform Entry Point (`app/cmd/app/app_linux.go`)
-
-New file implementing:
-
-- `osRun()` — Initialize tray, start GTK main loop (or systray.Run)
-- `handleExistingInstance()` — Check for running instance (PID file from `server_unix.go`)
-- `showWindow()` / `hideWindow()` — GTK window show/hide or webview visibility
-- `installSymlink()` — Create `/usr/local/bin/ollama` symlink (or skip if already installed via package manager)
-- `registerLoginItem()` — Create `.desktop` file in `~/.config/autostart/`
-
-### 2.4 Dialog System (`app/dialog/dlgs_linux.go`)
-
-**Option A: Zenity/kdialog** (simplest)
-- Shell out to `zenity` (GNOME) or `kdialog` (KDE)
-- No CGO needed
-- Available on virtually all Linux desktops
-- Covers: message boxes, file open/save, directory browse
-
-**Option B: GTK dialogs via gotk3**
-- Native, no external dependency
-- Requires CGO + GTK dev libs (already needed for webview)
-- More code to write
-
-**Option C: Portal API (xdg-desktop-portal)**
-- Modern, sandbox-friendly (Flatpak/Snap compatible)
-- D-Bus based, no CGO
-- Best for future-proofing
-
-**Recommendation:** Option A for initial implementation (fast, reliable), with a plan to migrate to Option C for future Flatpak/Snap packaging.
-
-### 2.5 Server Management (`app/server/`)
-
-`server_unix.go` already works for Linux. It uses:
-- PID file at `~/.ollama/ollama.pid` (via `server.PIDFile()`)
-- Server log at `~/.ollama/logs/server.log`
-- `pgrep`/`pkill` for process management
-- `os.Interrupt` signal for graceful shutdown
-
-**Needed changes:**
-- Verify paths are appropriate for Linux (XDG compliance: `$XDG_DATA_HOME`, `$XDG_CONFIG_HOME`)
-- The current paths (`~/.ollama/`) match what the CLI already uses on Linux, so no change needed initially
-
-### 2.6 Build Constraints
-
-Every file with `//go:build windows || darwin` needs to be updated. Two approaches:
-
-**Approach A: Add `linux` to existing constraints**
-```go
-//go:build windows || darwin || linux
-```
-For shared code that should also compile on Linux.
-
-**Approach B: Split into platform files**
-Where Darwin and Windows behavior diverge from Linux, create `*_linux.go` files.
-
-**Practical plan:**
-1. Update shared files: `app.go`, `webview.go`, `server.go`, `ui/*.go`, `store/*.go` → add `|| linux`
-2. Create new Linux-specific files: `app_linux.go`, `dlgs_linux.go`
-3. Leave Darwin/Windows files unchanged
-
-### 2.7 Updater (`app/updater/updater_linux.go`)
-
-Linux update strategy depends on distribution method:
-
-- **AppImage:** Self-contained, can self-update (download + replace)
-- **Deb/RPM:** Updates via apt/dnf, app should just notify
-- **Snap/Flatpak:** Updates via store, app should just notify
-- **Manual/tarball:** Self-update like AppImage
-
-**Initial approach:** Detect install method, show notification only (don't auto-update). The CLI `ollama` already handles updates on Linux.
-
-### 2.8 Desktop Integration
-
-- **`.desktop` file** for application launcher (`/usr/share/applications/ollama.desktop` or `~/.local/share/applications/`)
-- **Icon assets** — SVG + multiple PNG sizes for `/usr/share/icons/hicolor/`
-- **URL scheme handler** — Register `ollama://` protocol via `.desktop` file `MimeType` field
-- **Autostart** — `.desktop` file in `~/.config/autostart/` with `X-GNOME-Autostart-enabled=true`
-
----
-
-## 3. Dependency Summary
-
-### Runtime
-- GTK 3 (`libgtk-3-0`)
-- WebKit2GTK (`libwebkit2gtk-4.1-0`)
-- libayatana-appindicator3 (for systray, if using getlantern/systray)
-
-### Build
-- `libgtk-3-dev`
-- `libwebkit2gtk-4.1-dev`
-- `libayatana-appindicator3-dev`
-- Go 1.22+ with CGO_ENABLED=1
-- `pkg-config`
-
-### Ubuntu install:
 ```bash
-sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev pkg-config
+# Build
+sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+
+# Runtime
+# libgtk-3-0 libwebkit2gtk-4.1-0 zenity (typically already installed on Ubuntu)
 ```
 
----
+### Risk Assessment (updated)
 
-## 4. Implementation Phases
-
-### Phase 1: Minimal Viable Linux GUI
-**Goal:** Webview window showing the React UI, with a system tray icon.
-
-1. Re-add GTK backend to `app/webview/` from upstream webview library
-2. Update build constraints on shared code (`app.go`, `ui/`, `store/`, `server/`)
-3. Create `app/cmd/app/app_linux.go` with `osRun()` using getlantern/systray
-4. Create `app/dialog/dlgs_linux.go` using zenity
-5. Verify the React SPA loads and works in WebKit2GTK
-6. Test on Ubuntu 22.04 and 24.04
-
-**Deliverable:** `go build -tags linux ./app/cmd/app` produces a working binary.
-
-### Phase 2: Desktop Integration
-1. Create `.desktop` file and icon assets
-2. Implement autostart registration
-3. Implement `ollama://` URL scheme handling
-4. Create build script (`scripts/build_linux.sh`)
-
-### Phase 3: Packaging
-1. AppImage packaging (self-contained, works everywhere)
-2. Deb package for Ubuntu/Debian
-3. Optional: Snap or Flatpak
-
-### Phase 4: Polish
-1. Update notification (detect install method, show appropriate message)
-2. XDG compliance audit (config/data/cache directories)
-3. Wayland compatibility testing (WebKit2GTK handles this, but verify)
-4. Multi-monitor / HiDPI testing
-
----
-
-## 5. Key Decisions Needed
-
-| Decision | Options | Recommendation | Status |
-|----------|---------|----------------|--------|
-| Tray library | getlantern/systray vs gotk3 vs dbus | getlantern/systray | Pending |
-| Dialog system | zenity vs gotk3 vs xdg-portal | zenity (phase 1), xdg-portal (later) | Pending |
-| Webview approach | Re-add upstream GTK backend vs full update | Re-add GTK backend | Pending |
-| GTK version | GTK 3 vs GTK 4 | GTK 3 (matches WebKit2GTK availability) | Pending |
-| WebKit2GTK version | 4.0 vs 4.1 | 4.1 (Ubuntu 22.04+, better security) | Pending |
-| Primary packaging | AppImage vs Deb vs Snap | AppImage (phase 1) + Deb (phase 3) | Pending |
-| Minimum Ubuntu | 20.04 vs 22.04 | 22.04 LTS (webkit2gtk-4.1 available) | Pending |
-
----
-
-## 6. Risk Assessment
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Upstream webview divergence | High — GTK backend may not drop in cleanly | Audit upstream, pin to compatible version |
-| WebKit2GTK rendering differences | Medium — React SPA may render differently than Chrome/Safari | Early testing, CSS fixes |
-| Tray icon inconsistency across DEs | Medium — GNOME, KDE, XFCE all handle trays differently | getlantern/systray handles this; test on major DEs |
-| Wayland vs X11 differences | Low — WebKit2GTK + GTK3 handle both | Test under both |
-| CGO cross-compilation | Medium — Need Linux build environment | Build on Linux, CI with Ubuntu runners |
-
----
-
-## 7. Files to Create/Modify
-
-### New Files
-- `app/cmd/app/app_linux.go` — Linux platform entry point
-- `app/dialog/dlgs_linux.go` — Linux dialog implementation
-- `app/linuxtray/` (if not using getlantern/systray as a module)
-- `app/updater/updater_linux.go` — Linux update stub
-- `scripts/build_linux.sh` — Build script
-- `app/assets/ollama.desktop` — Desktop entry
-- `app/assets/ollama.svg` — Linux icon (SVG)
-
-### Modified Files (build constraint updates)
-- `app/cmd/app/app.go` — Add `|| linux` to build constraint
-- `app/cmd/app/webview.go` — Add `|| linux`
-- `app/webview/webview.go` — Add Linux CGO flags + `|| linux` build tag
-- `app/webview/webview.h` — Restore GTK backend definitions
-- `app/ui/ui.go` — Add `|| linux`
-- `app/ui/app.go` — Add `|| linux`
-- `app/store/*.go` — Add `|| linux` where constrained
-- `app/server/server.go` — Add `|| linux`
-- `app/dialog/dlgs.go` — Add `|| linux`
-- `app/updater/updater.go` — Add `|| linux`
-- `go.mod` / `go.sum` — Add getlantern/systray dependency
-
----
-
-## 8. Open Questions
-
-1. **Should this be a fork or upstream PR?** If targeting upstream ollama, need to match their code style and get buy-in. If local fork, more freedom but maintenance burden.
-2. **WebKit2GTK version:** 4.0 API is available on older distros but 4.1 has better security defaults. Ubuntu 22.04 has both.
-3. **Should the Linux app reuse the existing `wintray` menu structure?** Or create a Linux-native menu with different items (e.g., no "Check for Updates" if installed via apt)?
-4. **Testing matrix:** Which Linux distros/DEs to officially support? Ubuntu (GNOME), Kubuntu (KDE), Fedora, Arch?
+| Risk | Impact | Status |
+|------|--------|--------|
+| Upstream webview divergence | High | **Non-issue:** GTK backend was already in the vendored header |
+| WebKit2GTK rendering differences | Medium | **Resolved:** CSS injection fixes viewport height |
+| NVIDIA GPU compatibility | Medium | **Resolved:** webview.h auto-detects NVIDIA and applies dmabuf workaround |
+| Tray icon inconsistency across DEs | Medium | Deferred to Phase 2 |
+| Wayland vs X11 differences | Low | Untested but expected to work (GTK3 auto-selects) |
+| JSC signal conflict with Go | Low | **Resolved:** warning is harmless, no action needed |
