@@ -22,7 +22,10 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Iterable, List, Tuple
+
+
+HOME_ROOT = Path.home().resolve()
 
 
 def fmt_bytes(n: int) -> str:
@@ -65,6 +68,142 @@ def safe_iterdir(path: Path) -> List[Path]:
         return list(path.iterdir())
     except OSError:
         return []
+
+
+def is_under_home(path: Path) -> bool:
+    try:
+        rp = path.expanduser().resolve(strict=False)
+    except Exception:
+        return False
+    return rp == HOME_ROOT or HOME_ROOT in rp.parents
+
+
+def require_under_home(path: Path, action: str) -> Path:
+    rp = path.expanduser().resolve(strict=False)
+    if not is_under_home(rp):
+        raise ValueError(f"Refusing to {action} outside home: {rp}")
+    return rp
+
+
+def guarded_unlink(path: Path) -> None:
+    rp = require_under_home(path, "delete")
+    if rp.exists() or rp.is_symlink():
+        rp.unlink()
+
+
+def guarded_symlink(link_path: Path, target_path: Path) -> None:
+    # Only the link itself must be under home — the target may be anywhere.
+    lp = require_under_home(link_path, "create symlink")
+    os.symlink(target_path, lp)
+
+
+def list_blobs_in_dir(blobs_dir: Path) -> dict:
+    """Return {name: path} for all sha256-* files directly in blobs_dir."""
+    out = {}
+    if not blobs_dir.is_dir():
+        return out
+    for p in blobs_dir.iterdir():
+        if p.name.startswith("sha256-") and p.is_file():
+            out[p.name] = p
+    return out
+
+
+def list_blobs_in_home_folder(home_root: Path, exclude_dir: Path) -> List[Path]:
+    """Find sha256-* blob files in any .ollama/models/blobs dir under HOME,
+    excluding exclude_dir (the canonical global root)."""
+    out: List[Path] = []
+    exclude_resolved = exclude_dir.resolve()
+
+    for root, dirs, files in os.walk(home_root):
+        root_path = Path(root)
+        parts = root_path.parts
+
+        if len(parts) < 3 or parts[-3:] != (".ollama", "models", "blobs"):
+            continue
+
+        if root_path.resolve() == exclude_resolved:
+            continue
+
+        for name in files:
+            if name.startswith("sha256-"):
+                out.append(root_path / name)
+
+    return sorted(out)
+
+
+def dedup_home_blobs(global_blobs_root: Path, apply_changes: bool) -> int:
+    global_blobs_root = global_blobs_root.expanduser().resolve()
+    if not global_blobs_root.is_dir():
+        print(f"Global blobs root not found: {global_blobs_root}")
+        return 3
+
+    root_blobs = list_blobs_in_dir(global_blobs_root)
+    home_blobs = list_blobs_in_home_folder(HOME_ROOT, exclude_dir=global_blobs_root)
+
+    mode = "DEDUP" if apply_changes else "DEDUP-DRY"
+    print(f"{mode}: global root = {global_blobs_root}")
+    print(f"{mode}: root blobs  = {len(root_blobs)}")
+    print(f"{mode}: home blobs  = {len(home_blobs)}")
+
+    if not home_blobs:
+        print(f"{mode}: no blobs outside the canonical root — nothing to dedup.")
+        return 0
+
+    actions = []
+    reclaimable = 0
+    skipped = 0
+
+    for src in home_blobs:
+        canonical = root_blobs.get(src.name)
+        if canonical is None:
+            skipped += 1
+            print(f"  SKIP (not in root)       {src}")
+            continue
+
+        if src.is_symlink():
+            try:
+                if src.resolve() == canonical.resolve():
+                    print(f"  SKIP (already symlinked) {src}")
+                    continue
+            except OSError:
+                pass
+
+        try:
+            src_size = src.stat().st_size
+            can_size = canonical.stat().st_size
+        except OSError:
+            skipped += 1
+            print(f"  SKIP (stat error)        {src}")
+            continue
+
+        if src_size != can_size:
+            skipped += 1
+            print(f"  SKIP (size mismatch {fmt_bytes(src_size)} vs {fmt_bytes(can_size)}) {src}")
+            continue
+
+        actions.append((src, canonical, src_size))
+        reclaimable += src_size
+
+    print(f"{mode}: actions     = {len(actions)}")
+    print(f"{mode}: skipped     = {skipped}")
+    print(f"{mode}: reclaimable = {fmt_bytes(reclaimable)}")
+
+    preview = 20
+    for idx, (src, canonical, size) in enumerate(actions[:preview], start=1):
+        print(f"  [{idx}] {src} -> {canonical} ({fmt_bytes(size)})")
+    if len(actions) > preview:
+        print(f"  ... {len(actions) - preview} more action(s)")
+
+    if not apply_changes:
+        return 0
+
+    for src, canonical, _ in actions:
+        # Both operations are guarded to HOME in helper functions.
+        guarded_unlink(src)
+        guarded_symlink(src, canonical)
+
+    print(f"DEDUP: applied {len(actions)} replacement(s).")
+    return 0
 
 
 def discover_default_paths() -> List[Path]:
@@ -226,11 +365,33 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Explicit models root path (can be repeated). Example: ~/.ollama/models",
     )
+    parser.add_argument(
+        "--dedup-dry",
+        action="store_true",
+        help="Preview dedup under HOME only: replace duplicate blob files with symlinks to global blobs root.",
+    )
+    parser.add_argument(
+        "--dedup",
+        action="store_true",
+        help="Apply dedup under HOME only: delete duplicate files and create symlinks to global blobs root.",
+    )
+    parser.add_argument(
+        "--global-blobs-root",
+        default="/usr/share/ollama/.ollama/models/blobs",
+        help="Canonical system blobs root used as dedup target (e.g. /usr/share/ollama/.ollama/models/blobs).",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+
+    if args.dedup and args.dedup_dry:
+        print("Use only one of --dedup-dry or --dedup.")
+        return 2
+
+    if args.dedup_dry or args.dedup:
+        return dedup_home_blobs(Path(args.global_blobs_root), apply_changes=args.dedup)
 
     if args.path:
         roots = existing_dirs(Path(p) for p in args.path)
