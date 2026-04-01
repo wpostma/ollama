@@ -120,15 +120,18 @@ func performWebSearch(ctx context.Context, query string, maxResults int) (*Searc
 	q.Add("ts", strconv.FormatInt(time.Now().Unix(), 10))
 	searchURL.RawQuery = q.Encode()
 
-	data := fmt.Appendf(nil, "%s,%s", http.MethodPost, searchURL.RequestURI())
-	signature, err := auth.Sign(ctx, data)
-	if err != nil {
-		slog.Error("web_search: auth.Sign failed", "error", err)
-		return nil, fmt.Errorf("failed to sign request: %w", err)
+	// Prefer API key auth when available. Only fall back to SSH signing otherwise.
+	apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
+	signature := ""
+	if apiKey == "" {
+		data := fmt.Appendf(nil, "%s,%s", http.MethodPost, searchURL.RequestURI())
+		signature, err = auth.Sign(ctx, data)
+		if err != nil {
+			slog.Error("web_search: auth.Sign failed", "error", err)
+			return nil, fmt.Errorf("failed to sign request: %w", err)
+		}
 	}
 
-	// Check for API key override
-	apiKey := os.Getenv("OLLAMA_API_KEY")
 	slog.Debug("web_search: auth", "has_signature", signature != "", "has_api_key", apiKey != "", "url", searchURL.String())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, searchURL.String(), bytes.NewBuffer(jsonBody))

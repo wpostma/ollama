@@ -299,8 +299,27 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/version", ollamaProxy)
 	mux.Handle("GET /api/status", ollamaProxy)
 	mux.Handle("HEAD /api/version", ollamaProxy)
-	mux.Handle("POST /api/me", ollamaProxy)
-	mux.Handle("POST /api/signout", ollamaProxy)
+	mux.Handle("POST /api/me", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(api.UserResponse{
+				Name:  "API Key",
+				Email: "api-key-auth@local",
+				Plan:  "api_key",
+			})
+			return
+		}
+
+		ollamaProxy.ServeHTTP(w, r)
+	}))
+	mux.Handle("POST /api/signout", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.TrimSpace(os.Getenv("OLLAMA_API_KEY")) != "" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		ollamaProxy.ServeHTTP(w, r)
+	}))
 
 	// React app - catch all non-API routes and serve the React app
 	mux.Handle("GET /", s.appHandler())
