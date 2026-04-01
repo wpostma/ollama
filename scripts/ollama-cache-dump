@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""
+ollama-cache-dump
+
+Scan common Ollama model cache locations and print per-model disk usage.
+
+By default this checks likely Linux and mounted Windows locations, including:
+- $OLLAMA_MODELS
+- ~/.ollama/models
+- /var/lib/ollama/models
+- /mnt/c/Users/*/.ollama/models
+- /media/*/Users/*/.ollama/models
+
+Usage:
+  scripts/ollama-cache-dump
+  scripts/ollama-cache-dump --path ~/.ollama/models --path /var/lib/ollama/models
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+from typing import Dict, Iterable, List, Tuple
+
+
+def fmt_bytes(n: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    val = float(n)
+    for unit in units:
+        if val < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(val)} {unit}"
+            return f"{val:.2f} {unit}"
+        val /= 1024.0
+    return f"{n} B"
+
+
+def existing_dirs(paths: Iterable[Path]) -> List[Path]:
+    seen = set()
+    out: List[Path] = []
+    for p in paths:
+        try:
+            rp = p.expanduser().resolve()
+        except Exception:
+            continue
+        if rp in seen:
+            continue
+        seen.add(rp)
+        if rp.is_dir():
+            out.append(rp)
+    return out
+
+
+def safe_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def safe_iterdir(path: Path) -> List[Path]:
+    try:
+        return list(path.iterdir())
+    except OSError:
+        return []
+
+
+def discover_default_paths() -> List[Path]:
+    candidates: List[Path] = []
+
+    env_models = os.environ.get("OLLAMA_MODELS", "").strip()
+    if env_models:
+        candidates.append(Path(env_models))
+
+    candidates.extend(
+        [
+            Path.home() / ".ollama" / "models",
+            Path("/var/lib/ollama/models"),
+            Path("/usr/share/ollama/.ollama/models"),
+        ]
+    )
+
+    # WSL default mount for Windows user profiles.
+    mnt_c_users = Path("/mnt/c/Users")
+    if safe_is_dir(mnt_c_users):
+        for user_dir in safe_iterdir(mnt_c_users):
+            candidates.append(user_dir / ".ollama" / "models")
+
+    # Mounted drives on this workstation often show up under /media.
+    media_root = Path("/media")
+    if safe_is_dir(media_root):
+        for mount in safe_iterdir(media_root):
+            users = mount / "Users"
+            if safe_is_dir(users):
+                for user_dir in safe_iterdir(users):
+                    candidates.append(user_dir / ".ollama" / "models")
+            homes = mount / "home"
+            if safe_is_dir(homes):
+                for user_dir in safe_iterdir(homes):
+                    candidates.append(user_dir / ".ollama" / "models")
+
+    return existing_dirs(candidates)
+
+
+def model_ref_from_manifest_path(manifest_file: Path, manifests_root: Path) -> str:
+    rel = manifest_file.relative_to(manifests_root)
+    parts = rel.parts
+    if len(parts) < 2:
+        return rel.as_posix()
+    registry = parts[0]
+    tag = parts[-1]
+    repo_path = "/".join(parts[1:-1])
+    return f"{registry}/{repo_path}:{tag}"
+
+
+def digest_to_blob_path(blobs_root: Path, digest: str) -> Path:
+    # Example digest: sha256:abc... -> blobs/sha256-abc...
+    return blobs_root / digest.replace(":", "-")
+
+
+def load_manifest(manifest_file: Path) -> dict:
+    with manifest_file.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def scan_store(models_root: Path) -> Tuple[List[dict], int, int]:
+    manifests_root = models_root / "manifests"
+    blobs_root = models_root / "blobs"
+
+    if not manifests_root.is_dir() or not blobs_root.is_dir():
+        return [], 0, 0
+
+    manifests: List[Path] = [p for p in manifests_root.rglob("*") if p.is_file()]
+    rows: List[dict] = []
+
+    total_declared = 0
+    total_on_disk = 0
+
+    for mf in sorted(manifests):
+        try:
+            payload = load_manifest(mf)
+        except Exception:
+            continue
+
+        model_ref = model_ref_from_manifest_path(mf, manifests_root)
+        layers = payload.get("layers", []) or []
+
+        declared = 0
+        on_disk = 0
+        missing = 0
+
+        for layer in layers:
+            digest = str(layer.get("digest", ""))
+            size = int(layer.get("size", 0) or 0)
+            declared += size
+
+            if digest:
+                bp = digest_to_blob_path(blobs_root, digest)
+                if bp.is_file():
+                    try:
+                        on_disk += bp.stat().st_size
+                    except OSError:
+                        missing += 1
+                else:
+                    missing += 1
+
+        total_declared += declared
+        total_on_disk += on_disk
+
+        rows.append(
+            {
+                "model": model_ref,
+                "declared_bytes": declared,
+                "on_disk_bytes": on_disk,
+                "missing_blobs": missing,
+                "manifest": str(mf),
+            }
+        )
+
+    return rows, total_declared, total_on_disk
+
+
+def print_store_report(models_root: Path) -> None:
+    rows, total_declared, total_on_disk = scan_store(models_root)
+    if not rows:
+        return
+
+    blobs_root = models_root / "blobs"
+    manifests_root = models_root / "manifests"
+
+    blob_dir_size = 0
+    for p in blobs_root.rglob("*"):
+        if p.is_file():
+            try:
+                blob_dir_size += p.stat().st_size
+            except OSError:
+                pass
+
+    print(f"Store: {models_root}")
+    print(f"  Manifests: {len(rows)}")
+    print(f"  Blob dir size (unique): {fmt_bytes(blob_dir_size)}")
+    print(f"  Manifest declared total: {fmt_bytes(total_declared)}")
+    print(f"  Manifest on-disk total: {fmt_bytes(total_on_disk)}")
+    print("  Models:")
+
+    for row in sorted(rows, key=lambda r: r["on_disk_bytes"], reverse=True):
+        missing = row["missing_blobs"]
+        miss = f", missing_blobs={missing}" if missing else ""
+        print(
+            f"    - {row['model']} | on_disk={fmt_bytes(row['on_disk_bytes'])}"
+            f" | declared={fmt_bytes(row['declared_bytes'])}{miss}"
+        )
+
+    print(f"  Manifests root: {manifests_root}")
+    print(f"  Blobs root: {blobs_root}")
+    print()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Dump Ollama cache models and sizes.")
+    parser.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        help="Explicit models root path (can be repeated). Example: ~/.ollama/models",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    if args.path:
+        roots = existing_dirs(Path(p) for p in args.path)
+    else:
+        roots = discover_default_paths()
+
+    if not roots:
+        print("No Ollama model stores found.")
+        return 1
+
+    found_any = False
+    for root in roots:
+        rows, _, _ = scan_store(root)
+        if rows:
+            found_any = True
+            print_store_report(root)
+
+    if not found_any:
+        print("No valid Ollama stores with both manifests/ and blobs/ found.")
+        print("Checked paths:")
+        for r in roots:
+            print(f"  - {r}")
+        return 2
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
