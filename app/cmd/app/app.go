@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 package main
 
@@ -476,7 +476,10 @@ func openInBrowser(url string) {
 	case "darwin":
 		cmd = "open"
 		args = []string{url}
-	default: // "linux", "freebsd", "openbsd", "netbsd"... should not reach here
+	case "linux":
+		cmd = "xdg-open"
+		args = []string{url}
+	default:
 		slog.Warn("unsupported OS for openInBrowser", "os", runtime.GOOS)
 	}
 

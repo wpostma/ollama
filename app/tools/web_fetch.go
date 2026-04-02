@@ -1,4 +1,4 @@
-//go:build windows || darwin
+//go:build windows || darwin || linux
 
 package tools
 
@@ -97,10 +97,14 @@ func performWebFetch(ctx context.Context, targetURL string) (*FetchResponse, err
 	query.Add("ts", strconv.FormatInt(time.Now().Unix(), 10))
 	crawlURL.RawQuery = query.Encode()
 
-	data := fmt.Appendf(nil, "%s,%s", http.MethodPost, crawlURL.RequestURI())
-	signature, err := auth.Sign(ctx, data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign request: %w", err)
+	apiKey := strings.TrimSpace(os.Getenv("OLLAMA_API_KEY"))
+	signature := ""
+	if apiKey == "" {
+		data := fmt.Appendf(nil, "%s,%s", http.MethodPost, crawlURL.RequestURI())
+		signature, err = auth.Sign(ctx, data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to sign request: %w", err)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, crawlURL.String(), bytes.NewBuffer(jsonBody))
@@ -109,7 +113,7 @@ func performWebFetch(ctx context.Context, targetURL string) (*FetchResponse, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	if apiKey := os.Getenv("OLLAMA_API_KEY"); apiKey != "" {
+	if apiKey != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
 	} else if signature != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", signature))

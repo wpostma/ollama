@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -13,6 +14,16 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+// useExistingServer on Windows always starts its own server.
+func useExistingServer(_ context.Context) bool {
+	return false
+}
+
+// openServerLog opens the server log file for reading.
+func openServerLog() (io.ReadCloser, error) {
+	return os.Open(serverLogPath)
+}
 
 var (
 	pidFile       = filepath.Join(os.Getenv("LOCALAPPDATA"), "Ollama", "ollama.pid")

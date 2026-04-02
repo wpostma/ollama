@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,6 +15,16 @@ import (
 	"strings"
 	"syscall"
 )
+
+// useExistingServer on macOS always starts its own server.
+func useExistingServer(_ context.Context) bool {
+	return false
+}
+
+// openServerLog opens the server log file for reading.
+func openServerLog() (io.ReadCloser, error) {
+	return os.Open(serverLogPath)
+}
 
 var (
 	pidFile       = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "Ollama", "ollama.pid")

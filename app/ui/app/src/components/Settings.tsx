@@ -273,6 +273,7 @@ export default function Settings() {
   }
 
   const isWindows = navigator.platform.toLowerCase().includes("win");
+  const isLinux = navigator.platform.toLowerCase().includes("linux");
 
   return (
     <main className="flex h-screen w-full flex-col select-none dark:bg-neutral-900">
@@ -282,9 +283,9 @@ export default function Settings() {
         onDoubleClick={() => window.doubleClick && window.doubleClick()}
       >
         <h1
-          className={`${isWindows ? "pl-4" : "pl-24"} flex items-center font-rounded text-md font-medium dark:text-white`}
+          className={`${isWindows || isLinux ? "pl-4" : "pl-24"} flex items-center font-rounded text-md font-medium dark:text-white`}
         >
-          {isWindows && (
+          {(isWindows || isLinux) && (
             <button
               onClick={() => navigate({ to: "/" })}
               className="hover:bg-neutral-100 mr-3 dark:hover:bg-neutral-800 rounded-full p-1.5"
@@ -294,7 +295,7 @@ export default function Settings() {
           )}
           Settings
         </h1>
-        {!isWindows && (
+        {!isWindows && !isLinux && (
           <button
             onClick={() => navigate({ to: "/" })}
             className="p-1 hover:bg-neutral-100 mr-3 dark:hover:bg-neutral-800 rounded-full"
