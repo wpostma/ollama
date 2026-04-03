@@ -274,6 +274,10 @@ export default function Settings() {
 
   const isWindows = navigator.platform.toLowerCase().includes("win");
   const isLinux = navigator.platform.toLowerCase().includes("linux");
+  const handleCloseSettings = () => {
+    const chatId = settings.LastHomeView === "chat" ? "new" : "launch";
+    navigate({ to: "/c/$chatId", params: { chatId } });
+  };
 
   return (
     <main className="flex h-screen w-full flex-col select-none dark:bg-neutral-900">
@@ -287,7 +291,7 @@ export default function Settings() {
         >
           {(isWindows || isLinux) && (
             <button
-              onClick={() => navigate({ to: "/" })}
+              onClick={handleCloseSettings}
               className="hover:bg-neutral-100 mr-3 dark:hover:bg-neutral-800 rounded-full p-1.5"
             >
               <ArrowLeftIcon className="w-5 h-5 dark:text-white" />
@@ -297,7 +301,7 @@ export default function Settings() {
         </h1>
         {!isWindows && !isLinux && (
           <button
-            onClick={() => navigate({ to: "/" })}
+            onClick={handleCloseSettings}
             className="p-1 hover:bg-neutral-100 mr-3 dark:hover:bg-neutral-800 rounded-full"
           >
             <XMarkIcon className="w-6 h-6 dark:text-white" />
