@@ -1,5 +1,22 @@
 #!/bin/sh
 
+# Parse arguments
+FULL_BUILD=0
+for arg in "$@"; do
+  case "$arg" in
+    --full) FULL_BUILD=1 ;;
+  esac
+done
+
+if [ "$FULL_BUILD" = "1" ]; then
+  # real build
+  cmake -B build
+  cmake --build build
+  #stop
+  exit 0
+fi
+
+# toy frontend build
 rm -f ollama-app ollama
 
 # 1. Build React SPA
